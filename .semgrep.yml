@@ -1,0 +1,17 @@
+# baseline semgrep configuration for JavaScript
+
+rules:
+  # detect useless equality (==) which can lead to type coercion bugs
+  - id: js.useless-equality
+    pattern: $X == $Y
+    message: "Avoid use of ==; use === instead."
+    languages: [javascript]
+    severity: WARNING
+
+  # custom rules can be appended here by developers
+
+  - id: test-custom
+    pattern: console.log('secret')
+    message: custom rule
+    languages: [javascript]
+    severity: ERROR

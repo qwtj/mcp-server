@@ -1,0 +1,129 @@
+openapi: 3.0.3
+info:
+  title: MCP Server API
+  version: 0.1.0
+  description: |
+    Minimal Express-based service exposing a health check, demo tool access route, and
+    an optional sandboxed tool execution endpoint.  The `/run-tool` endpoint is
+    feature-flagged via the `ENABLE_TOOL_SANDBOX` environment variable and is
+    intended for controlled internal use only.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+paths:
+  /:
+    get:
+      summary: Health check
+      description: Returns a simple text string to verify the service is running.
+      responses:
+        '200':
+          description: Service is running
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: MCP server running
+
+  /tool:
+    get:
+      summary: Legacy demo route
+      description: |
+        Reads the `TOOL_API_KEY` secret via the secret manager and logs an audit
+        event.  Primarily useful for verifying wiring of the secret and audit
+        subsystems; not intended for production use.
+      responses:
+        '200':
+          description: Tool executed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: string
+                    example: tool executed
+                  secretStub:
+                    type: boolean
+                    description: indicates whether a secret was found
+                    example: true
+        '500':
+          description: Server error (e.g. missing secret)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /run-tool:
+    post:
+      summary: Execute an external tool (sandboxed)
+      description: |
+        Runs an allowlisted binary with provided arguments.  Requires
+        `ENABLE_TOOL_SANDBOX=true` in the environment; otherwise the route
+        returns a 404.  All invocations are audited and any failure returns a
+        400 with an error message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunToolRequest'
+            example:
+              toolName: echo
+              args: ["hello world"]
+      responses:
+        '200':
+          description: Tool executed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: string
+                    example: executed
+                  details:
+                    type: object
+                    properties:
+                      code:
+                        type: integer
+                        example: 0
+                      signal:
+                        type: string
+                        nullable: true
+        '400':
+          description: Bad request (unknown tool, execution error, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Sandbox feature disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    RunToolRequest:
+      type: object
+      required:
+        - toolName
+      properties:
+        toolName:
+          type: string
+          description: Name of the executable to run; must be present in the allowlist.
+        args:
+          type: array
+          items:
+            type: string
+          description: Command-line arguments to pass to the tool.
+          default: []
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: human-readable error message

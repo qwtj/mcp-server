@@ -1,0 +1,22 @@
+{
+  "name": "mcp-server",
+  "version": "0.1.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "jest --coverage",
+    "scan:sast": "node scripts/semgrep.js",
+    "scan:deps": "npm audit --audit-level=$SECURITY_FAIL_LEVEL",
+    "scan": "node scripts/run-scans.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-validator": "^7.3.1"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "supertest": "^7.2.2",
+    "js-yaml": "^4.1.0",
+    "glob": "^10.3.0"
+  }
+}
