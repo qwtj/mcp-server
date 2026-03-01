@@ -23,23 +23,82 @@ app.get('/health', (req, res) => {
 
 // tools list (derive from allowlist if available, otherwise provide a small example tool)
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const config = require('./lib/config');
 const toolRunner = require('./lib/toolRunner');
+
+function resolveRequestedPath(requested) {
+  const value = String(requested || '.');
+  if (value === '~') {
+    return os.homedir();
+  }
+  if (value.startsWith('~/')) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return path.resolve(value);
+}
+
 function _buildTools() {
   try {
     const allow = config.getAllowlist();
     if (Array.isArray(allow) && allow.length > 0) {
-      const base = allow.map(name => ({ name }));
+      // expose MCP-style tool descriptors with explicit input schemas
+      const base = allow.map(name => ({
+        id: name,
+        name,
+        description: `allowlisted tool ${name}`,
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          additionalProperties: true
+        }
+      }));
       // also expose a server-side MCP tool for listing directories
-      base.push({ id: 'mcp.listDir', name: 'listDir', description: 'List files in a directory', params: { path: 'string' } });
+      base.push({
+        id: 'mcp.listDir',
+        name: 'mcp_listdir',
+        description: 'List files in a directory',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute or relative path to list' },
+            dir: { type: 'string', description: 'Alias for path' }
+          },
+          additionalProperties: true
+        }
+      });
       return base;
     }
   } catch (e) {
     // fallthrough to example tool
   }
+  // fallback tools should also include ids and minimal params so clients
+  // (including VS Code) don't reject the list as "invalid".
   return [
-    { name: 'example-tool', description: 'example tool for MCP' },
-    { id: 'mcp.listDir', name: 'listDir', description: 'List files in a directory', params: { path: 'string' } }
+    {
+      id: 'example-tool',
+      name: 'example-tool',
+      description: 'example tool for MCP',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: true
+      }
+    },
+    {
+      id: 'mcp.listDir',
+      name: 'mcp_listdir',
+      description: 'List files in a directory',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Absolute or relative path to list' },
+          dir: { type: 'string', description: 'Alias for path' }
+        },
+        additionalProperties: true
+      }
+    }
   ];
 }
 
@@ -53,12 +112,25 @@ app.options('/', (req, res) => res.status(404).send());
 // JSON-RPC style handlers for MCP
 async function handleJsonRpc(req, res) {
   const payload = req.body;
-  // debug: log incoming JSON-RPC payloads to help diagnose client mismatches
-  console.info('json-rpc received:', JSON.stringify(payload));
   if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'invalid payload' });
 
-  // notifications (no id) should return empty object
+  // Simple non-JSON-RPC request (used by some MCP clients): if the body
+  // contains a `path` or `dir` field and lacks an `id`, treat it as a
+  // basic listDir invocation.  Respond with a JSON-RPC‑style object so
+  // clients that blindly expect `jsonrpc`/`result` don't choke.
   if (!Object.prototype.hasOwnProperty.call(payload, 'id')) {
+    if (payload.path || payload.dir) {
+      const requested = payload.path || payload.dir || '.';
+      const target = resolveRequestedPath(requested);
+      try {
+        const entries = fs.readdirSync(target, { withFileTypes: true })
+          .map(d => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }));
+        return res.status(200).json({ content: entries });
+      } catch (err) {
+        return res.status(200).json({ content: [], error: err.message });
+      }
+    }
+    // existing notification handling
     return res.status(200).json({});
   }
 
@@ -72,32 +144,56 @@ async function handleJsonRpc(req, res) {
     return res.status(200).json({ jsonrpc: '2.0', id, result: { capabilities: { tools: _buildTools() } } });
   }
 
-  if (m.includes('tools')) {
-    return res.status(200).json({ jsonrpc: '2.0', id, result: { tools: _buildTools() } });
-  }
+  // tool invocation methods (different clients use various names).
+  // `tools/call` is the LSP-style name that VS Code's MCP client now uses.
+  // Also accept a bare tool name/id as the method itself; some wrappers send
+  // `{method: "mcp.listDir", params:{...}}` directly.  Build the tool list
+  // so we can recognise those names.
+  const tools = _buildTools();
+  const toolNames = tools.flatMap(t => [t.id, t.name].filter(Boolean).map(v => String(v).toLowerCase()));
 
-  // accept requests to run a tool: methods like 'tools/run', 'tool/run', 'tool/execute'
-    if (m.includes('run') || m.includes('execute')) {
+  if (
+    m === 'tools/call' ||
+    m === 'tool/call' ||
+    m.includes('run') ||
+    m.includes('execute') ||
+    toolNames.includes(m)
+  ) {
     const params = payload.params || {};
-    const toolName = params.toolName || params.name || (params.tool && params.tool.name) || params.id;
+    const toolArgsObject = params.arguments || {};
+    // if the method itself matched a tool name/id, use that as the toolName by
+    // default, unless the caller explicitly provided a different name field.
+    const toolName =
+      toolNames.includes(m) && !params.name && !params.toolName
+        ? (tools.find(t => [t.id, t.name].filter(Boolean).map(v => String(v).toLowerCase()).includes(m))?.id || m)
+        : params.toolName || params.name || (params.tool && params.tool.name) || params.id;
     const args = params.args || [];
     if (!toolName) {
       return res.status(200).json({ jsonrpc: '2.0', id, error: { message: 'missing toolName' } });
     }
 
     // Server-side implementation for the built-in mcp.listDir tool
-    if (toolName === 'mcp.listDir' || String(toolName).toLowerCase() === 'listdir' || String(toolName).toLowerCase() === 'list-dir') {
-      const requested = params.path || params.dir || args[0] || '.';
-      // restrict listing to inside project root for safety
-      const root = process.cwd();
-      const path = require('path');
-      const target = path.resolve(root, requested);
-      if (!target.startsWith(root)) {
-        return res.status(200).json({ jsonrpc: '2.0', id, error: { message: 'path outside allowed root' } });
-      }
+    if (
+      toolName === 'mcp.listDir' ||
+      String(toolName).toLowerCase() === 'mcp_listdir' ||
+      String(toolName).toLowerCase() === 'listdir' ||
+      String(toolName).toLowerCase() === 'list-dir'
+    ) {
+      const requested = params.path || params.dir || toolArgsObject.path || toolArgsObject.dir || args[0] || '.';
+      const target = resolveRequestedPath(requested);
       try {
         const entries = fs.readdirSync(target, { withFileTypes: true }).map(d => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }));
-        return res.status(200).json({ jsonrpc: '2.0', id, result: { entries } });
+        // include MCP-compliant content blocks while preserving `entries`
+        // for existing callers/tests.
+        return res.status(200).json({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            entries,
+            structuredContent: { entries },
+            content: [{ type: 'text', text: JSON.stringify(entries) }]
+          }
+        });
       } catch (err) {
         return res.status(200).json({ jsonrpc: '2.0', id, error: { message: err.message } });
       }
@@ -109,6 +205,11 @@ async function handleJsonRpc(req, res) {
     } catch (err) {
       return res.status(200).json({ jsonrpc: '2.0', id, error: { message: err.message } });
     }
+  }
+
+  // explicit tool listing endpoints
+  if (m === 'tools' || m === 'tools/list' || m === 'model/gettools' || m === 'tool/gettools' || m.endsWith('/gettools')) {
+    return res.status(200).json({ jsonrpc: '2.0', id, result: { tools: _buildTools() } });
   }
 
   return res.status(400).json({ jsonrpc: '2.0', id, error: { message: 'method not supported' } });

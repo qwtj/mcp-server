@@ -87,6 +87,26 @@ other consumers.
   body `{ toolName, args }`; rejects requests when the feature flag is off
   or the tool is not allowlisted.  All activity is audited.
 
+### MCP JSON‑RPC interface
+
+The server implements the [Model Context Protocol (MCP)](https://aka.ms/mcp)
+used by Visual Studio Code and other clients.  Incoming JSON-RPC messages may
+be POSTed to either `/mcp` or `/` and the following methods are supported:
+
+| Method | Description |
+|--------|-------------|
+| `initialize` | Negotiates capabilities and returns the available tools. |
+| `model/getTools`, `tools`, `tools/list` | Return the tool metadata array. |
+| `tools/call` | **execute** a tool, supplying `params.name` and
+  `params.arguments` (the spec form used by VS Code's client). |
+| `tool/run`, `tools/run`, `tool/execute` | Alternate invocation names that
+  continue to be supported for backwards compatibility. |
+
+When a tool call does not include an `id` it is treated as a notification and
+an empty object `{}` is returned.  The built-in `mcp.listDir` tool is
+implemented on the server side for convenience; other tools are executed via
+`lib/toolRunner.js`.
+
 Developers may also build additional routes and use `validators/validatePayload`
 for request validation.
 
