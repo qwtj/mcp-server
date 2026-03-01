@@ -22,18 +22,25 @@ app.get('/health', (req, res) => {
 });
 
 // tools list (derive from allowlist if available, otherwise provide a small example tool)
+const fs = require('fs');
 const config = require('./lib/config');
 const toolRunner = require('./lib/toolRunner');
 function _buildTools() {
   try {
     const allow = config.getAllowlist();
     if (Array.isArray(allow) && allow.length > 0) {
-      return allow.map(name => ({ name }));
+      const base = allow.map(name => ({ name }));
+      // also expose a server-side MCP tool for listing directories
+      base.push({ id: 'mcp.listDir', name: 'listDir', description: 'List files in a directory', params: { path: 'string' } });
+      return base;
     }
   } catch (e) {
     // fallthrough to example tool
   }
-  return [{ name: 'example-tool', description: 'example tool for MCP' }];
+  return [
+    { name: 'example-tool', description: 'example tool for MCP' },
+    { id: 'mcp.listDir', name: 'listDir', description: 'List files in a directory', params: { path: 'string' } }
+  ];
 }
 
 app.get('/', (req, res) => {
@@ -70,13 +77,32 @@ async function handleJsonRpc(req, res) {
   }
 
   // accept requests to run a tool: methods like 'tools/run', 'tool/run', 'tool/execute'
-  if (m.includes('run') || m.includes('execute')) {
+    if (m.includes('run') || m.includes('execute')) {
     const params = payload.params || {};
-    const toolName = params.toolName || params.name || (params.tool && params.tool.name);
+    const toolName = params.toolName || params.name || (params.tool && params.tool.name) || params.id;
     const args = params.args || [];
     if (!toolName) {
       return res.status(200).json({ jsonrpc: '2.0', id, error: { message: 'missing toolName' } });
     }
+
+    // Server-side implementation for the built-in mcp.listDir tool
+    if (toolName === 'mcp.listDir' || String(toolName).toLowerCase() === 'listdir' || String(toolName).toLowerCase() === 'list-dir') {
+      const requested = params.path || params.dir || args[0] || '.';
+      // restrict listing to inside project root for safety
+      const root = process.cwd();
+      const path = require('path');
+      const target = path.resolve(root, requested);
+      if (!target.startsWith(root)) {
+        return res.status(200).json({ jsonrpc: '2.0', id, error: { message: 'path outside allowed root' } });
+      }
+      try {
+        const entries = fs.readdirSync(target, { withFileTypes: true }).map(d => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }));
+        return res.status(200).json({ jsonrpc: '2.0', id, result: { entries } });
+      } catch (err) {
+        return res.status(200).json({ jsonrpc: '2.0', id, error: { message: err.message } });
+      }
+    }
+
     try {
       const result = await toolRunner.executeTool(toolName, args, {});
       return res.status(200).json({ jsonrpc: '2.0', id, result: { execution: result } });
