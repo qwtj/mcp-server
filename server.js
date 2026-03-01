@@ -16,9 +16,63 @@ try {
   console.error('failed to write startup audit log', e);
 }
 
-app.get('/', (req, res) => {
+// health endpoint
+app.get('/health', (req, res) => {
   res.status(200).send('MCP server running');
 });
+
+// tools list (derive from allowlist if available, otherwise provide a small example tool)
+const config = require('./lib/config');
+function _buildTools() {
+  try {
+    const allow = config.getAllowlist();
+    if (Array.isArray(allow) && allow.length > 0) {
+      return allow.map(name => ({ name }));
+    }
+  } catch (e) {
+    // fallthrough to example tool
+  }
+  return [{ name: 'example-tool', description: 'example tool for MCP' }];
+}
+
+app.get('/', (req, res) => {
+  res.status(200).json({ tools: _buildTools() });
+});
+
+// explicitly return 404 for OPTIONS on root per tests
+app.options('/', (req, res) => res.status(404).send());
+
+// JSON-RPC style handlers for MCP
+function handleJsonRpc(req, res) {
+  const payload = req.body;
+  // debug: log incoming JSON-RPC payloads to help diagnose client mismatches
+  console.info('json-rpc received:', JSON.stringify(payload));
+  if (!payload || typeof payload !== 'object') return res.status(400).json({ error: 'invalid payload' });
+
+  // notifications (no id) should return empty object
+  if (!Object.prototype.hasOwnProperty.call(payload, 'id')) {
+    return res.status(200).json({});
+  }
+
+  const id = payload.id;
+  const method = payload.method;
+
+  // be tolerant of method naming variants from different clients
+  const m = typeof method === 'string' ? method.toLowerCase() : '';
+
+  if (m.includes('initialize')) {
+    return res.status(200).json({ jsonrpc: '2.0', id, result: { capabilities: { tools: _buildTools() } } });
+  }
+
+  if (m.includes('tools')) {
+    return res.status(200).json({ jsonrpc: '2.0', id, result: { tools: _buildTools() } });
+  }
+
+  return res.status(400).json({ jsonrpc: '2.0', id, error: { message: 'method not supported' } });
+}
+
+app.post('/mcp', express.json(), handleJsonRpc);
+app.post('/', express.json(), handleJsonRpc);
 
 // sample tool execution route that reads a secret and logs the access
 app.get('/tool', (req, res) => {
