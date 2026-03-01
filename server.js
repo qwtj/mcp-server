@@ -23,6 +23,7 @@ app.get('/health', (req, res) => {
 
 // tools list (derive from allowlist if available, otherwise provide a small example tool)
 const config = require('./lib/config');
+const toolRunner = require('./lib/toolRunner');
 function _buildTools() {
   try {
     const allow = config.getAllowlist();
@@ -43,7 +44,7 @@ app.get('/', (req, res) => {
 app.options('/', (req, res) => res.status(404).send());
 
 // JSON-RPC style handlers for MCP
-function handleJsonRpc(req, res) {
+async function handleJsonRpc(req, res) {
   const payload = req.body;
   // debug: log incoming JSON-RPC payloads to help diagnose client mismatches
   console.info('json-rpc received:', JSON.stringify(payload));
@@ -66,6 +67,22 @@ function handleJsonRpc(req, res) {
 
   if (m.includes('tools')) {
     return res.status(200).json({ jsonrpc: '2.0', id, result: { tools: _buildTools() } });
+  }
+
+  // accept requests to run a tool: methods like 'tools/run', 'tool/run', 'tool/execute'
+  if (m.includes('run') || m.includes('execute')) {
+    const params = payload.params || {};
+    const toolName = params.toolName || params.name || (params.tool && params.tool.name);
+    const args = params.args || [];
+    if (!toolName) {
+      return res.status(200).json({ jsonrpc: '2.0', id, error: { message: 'missing toolName' } });
+    }
+    try {
+      const result = await toolRunner.executeTool(toolName, args, {});
+      return res.status(200).json({ jsonrpc: '2.0', id, result: { execution: result } });
+    } catch (err) {
+      return res.status(200).json({ jsonrpc: '2.0', id, error: { message: err.message } });
+    }
   }
 
   return res.status(400).json({ jsonrpc: '2.0', id, error: { message: 'method not supported' } });
